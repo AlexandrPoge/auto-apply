@@ -1,0 +1,30 @@
+# Binaries
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage.out
+
+# Air
+tmp/
+
+# Executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
