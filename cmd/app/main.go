@@ -2,10 +2,21 @@ package main
 
 import (
 	"fmt"
-	"hh-auto-apply/internal/config"
+	 "hh-autoapply/internal/config"
+	 "hh-autoapply/internal/app"
+	 "hh-autoapply/internal/model"
 )
 
 func main() {
-	cfg := config.NewConfig()
-	fmt.Println(cfg.AppName)
+	cfg, err := config.NewConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	app := app.NewApplication(cfg)
+	app.Run()
+
+	counter := &model.Counter{}
+	counter.Increment()
+	fmt.Println(counter.Value)
 }
