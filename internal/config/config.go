@@ -1,10 +1,10 @@
 package config
 
 type Config struct {
-	AppName string
-	HHToken string
-	SearchText string
-	SearchArea string
+	AppName       string
+	HHToken       string
+	SearchText    string
+	SearchArea    string
 	ApplyInterval time.Duration
 }
 
