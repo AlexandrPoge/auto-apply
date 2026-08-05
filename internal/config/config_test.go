@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 )
 
 func TestGetRequiredEnv(t *testing.T) {
@@ -18,10 +19,10 @@ func TestGetRequiredEnv(t *testing.T) {
 }
 
 func TestGetRequiredEnv_Missing(t *testing.T) {
- 
+
 	t.Setenv("TEST_MISSING", "")
 
-	value ,err := getRequiredEnv("TEST_MISSING")
+	value, err := getRequiredEnv("TEST_MISSING")
 
 	if err == nil {
 		t.Fatalf("expected error to be non-nil, got nil")
@@ -29,5 +30,33 @@ func TestGetRequiredEnv_Missing(t *testing.T) {
 
 	if value != "" {
 		t.Fatalf("expected value to be empty, got '%s'", value)
+	}
+}
+
+func TestNewConfig(t *testing.T) {
+	t.Setenv("HH_TOKEN", "test-token")
+	t.Setenv("APP_NAME", "test-app")
+	t.Setenv("SEARCH_TEXT", "golang")
+	t.Setenv("APPLY_INTERVAL", "30s")
+
+	cfg, err := NewConfig()
+	if err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	if cfg.HHToken != "test-token" {
+		t.Fatalf("expected HHToken to be 'test-token', got '%s'", cfg.HHToken)
+	}
+
+	if cfg.AppName != "test-app" {
+		t.Fatalf("expected AppName to be 'test-app', got '%s'", cfg.AppName)
+	}
+
+	if cfg.SearchText != "golang" {
+		t.Fatalf("expected SearchText to be 'golang', got '%s'", cfg.SearchText)
+	}
+
+	if cfg.ApplyInterval != 30*time.Second {
+		t.Fatalf("expected ApplyInterval to be 30 seconds, got '%s'", cfg.ApplyInterval)
 	}
 }

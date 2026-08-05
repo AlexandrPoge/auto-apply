@@ -63,5 +63,4 @@ func NewConfig() (*Config, error) {
 		SearchText:    searchText,
 		ApplyInterval: interval,
 	}, nil
-
 }
