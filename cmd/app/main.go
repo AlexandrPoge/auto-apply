@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	 "hh-autoapply/internal/config"
-	 "hh-autoapply/internal/app"
-	 "hh-autoapply/internal/model"
+	"hh-autoapply/internal/app"
+	"hh-autoapply/internal/config"
+	"hh-autoapply/internal/model"
 )
 
 func main() {
