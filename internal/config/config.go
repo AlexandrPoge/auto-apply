@@ -27,9 +27,7 @@ func getRequiredEnv(key string) (string, error) {
 }
 
 func NewConfig() (*Config, error) {
-	if err := godotenv.Load(); err != nil {
-		return nil, fmt.Errorf("failed to load .env file: %w", err)
-	}
+	_ = godotenv.Load()
 
 	token, err := getRequiredEnv("HH_TOKEN")
 	if err != nil {
