@@ -13,8 +13,8 @@ func main() {
 		panic(err)
 	}
 
-	app := app.NewApplication(cfg)
-	app.Run()
+	application := app.NewApplication(cfg)
+	application.Run()
 
 	counter := &model.Counter{}
 	counter.Increment()

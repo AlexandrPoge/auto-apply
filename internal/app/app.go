@@ -9,9 +9,9 @@ type Apllication struct {
 	Config *config.Config
 }
 
-func NewApplication(config *config.Config) *Apllication {
+func NewApplication(cfg *config.Config) *Apllication {
 	return &Apllication{
-		Config: config,
+		Config: cfg,
 	}
 }
 
