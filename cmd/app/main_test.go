@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestHomeOffersSafeAutomationModes(t *testing.T) {
+func TestHomeOffersLinkBasedLetterFlow(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handleHome(recorder, httptest.NewRequest("GET", "/", nil))
 
@@ -16,13 +16,10 @@ func TestHomeOffersSafeAutomationModes(t *testing.T) {
 	}
 	body := recorder.Body.String()
 	for _, text := range []string{
-		"Очередь на подтверждение",
-		"Автоподача по строгим правилам",
-		"Макс. откликов в день",
 		"Ссылка на вакансию hh.ru",
 		"Сохранить профиль",
-		"письмо соберётся автоматически",
-		"Одобрить и открыть hh.ru",
+		"Письмо появится автоматически",
+		"Открыть и скопировать",
 		"localStorage",
 	} {
 		if !strings.Contains(body, text) {
@@ -41,8 +38,15 @@ func TestBuildTemplateLetterUsesOnlyInputText(t *testing.T) {
 			t.Errorf("letter does not contain %q: %s", text, letter)
 		}
 	}
-	if strings.Contains(letter, "Второе предложение") {
-		t.Errorf("letter contains profile text beyond the first sentence: %s", letter)
+	if !strings.Contains(letter, "Второе предложение") {
+		t.Errorf("letter should include the second short profile sentence: %s", letter)
+	}
+}
+
+func TestLetterCanBeBuiltFromVacancyTitle(t *testing.T) {
+	letter := buildTemplateLetter(letterRequest{CandidateProfile: "Делаю сервисы на Go.", VacancyTitle: "AI Automation Engineer"})
+	if !strings.Contains(letter, "AI Automation Engineer") {
+		t.Fatalf("letter does not use title: %s", letter)
 	}
 }
 
