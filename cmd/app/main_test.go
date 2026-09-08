@@ -19,6 +19,8 @@ func TestHomeOffersSafeAutomationModes(t *testing.T) {
 		"Очередь на подтверждение",
 		"Автоподача по строгим правилам",
 		"Макс. откликов в день",
+		"Ссылка на вакансию hh.ru",
+		"Одобрить и открыть hh.ru",
 		"localStorage",
 	} {
 		if !strings.Contains(body, text) {
