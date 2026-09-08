@@ -25,9 +25,6 @@ tmp/
 # Empty nested Git checkout accidentally created beside the application.
 /auto-apply/
 
-# Local OAuth token and queue data
-/data/
-
 # Executables
 *.exe
 *.exe~
