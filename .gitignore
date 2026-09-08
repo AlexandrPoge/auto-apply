@@ -1,0 +1,33 @@
+# Binaries
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage.out
+
+# Air
+tmp/
+
+# Empty nested Git checkout accidentally created beside the application.
+/auto-apply/
+
+# Executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
