@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"bufio"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"html/template"
 	"io"
 	"log"
@@ -15,68 +12,28 @@ import (
 	"time"
 )
 
-const defaultModel = "gpt-5-mini"
-
-const letterInstructions = `Ты карьерный ассистент. Напиши персональное сопроводительное письмо на русском языке.
-
-Правила:
-- Используй ТОЛЬКО факты из профиля кандидата. Не выдумывай опыт, цифры, сертификаты, инструменты или знание n8n.
-- Отрази 2–3 наиболее релевантных совпадения с вакансией; если навыка нет в профиле, не утверждай, что он есть.
-- Стиль: деловой, живой, без канцелярита и без шаблонных фраз. Обращение нейтральное, если имя рекрутера не дано.
-- Длина: 700–1 100 знаков с пробелами. Не используй Markdown, заголовки, списки или подпись с контактами.
-- Верни только готовый текст письма.`
-
-type config struct {
-	APIKey string
-	Model  string
-}
-
 type letterRequest struct {
 	CandidateProfile string `json:"candidate_profile"`
 	VacancyText      string `json:"vacancy_text"`
+	VacancyTitle     string `json:"vacancy_title"`
 }
-
 type letterResponse struct {
 	Letter string `json:"letter"`
-	Model  string `json:"model"`
-}
-
-type openAIRequest struct {
-	Model           string  `json:"model"`
-	Instructions    string  `json:"instructions"`
-	Input           string  `json:"input"`
-	Store           bool    `json:"store"`
-	Temperature     float64 `json:"temperature"`
-	MaxOutputTokens int     `json:"max_output_tokens"`
-}
-
-type openAIResponse struct {
-	OutputText string `json:"output_text"`
-	Output     []struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"output"`
+	Source string `json:"source"`
 }
 
 func main() {
-	cfg := config{APIKey: os.Getenv("OPENAI_API_KEY"), Model: os.Getenv("OPENAI_MODEL")}
-	if cfg.Model == "" {
-		cfg.Model = defaultModel
-	}
-
+	loadDotEnv(".env")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleHome)
 	mux.HandleFunc("/healthz", handleHealth)
-	mux.HandleFunc("/api/letter", handleLetter(cfg))
-
+	mux.HandleFunc("/api/letter", handleLetter)
 	addr := os.Getenv("APP_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 	server := &http.Server{Addr: addr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("Cover Letter Studio is running at http://localhost%s", addr)
+	log.Printf("Reply Studio is running at http://localhost%s", addr)
 	log.Fatal(server.ListenAndServe())
 }
 
@@ -86,115 +43,108 @@ func handleHome(w http.ResponseWriter, _ *http.Request) {
 		log.Printf("render home: %v", err)
 	}
 }
-
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.WriteString(w, `{"status":"ok"}`)
 }
-
-func handleLetter(cfg config) http.HandlerFunc {
-	client := &http.Client{Timeout: 45 * time.Second}
-	return func(w http.ResponseWriter, r *http.Request) {
-		setCORS(w)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "используйте POST")
-			return
-		}
-		if cfg.APIKey == "" {
-			writeError(w, http.StatusServiceUnavailable, "не задан OPENAI_API_KEY: добавьте ключ в окружение приложения")
-			return
-		}
-
-		var input letterRequest
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		defer r.Body.Close()
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			writeError(w, http.StatusBadRequest, "неверный JSON: "+err.Error())
-			return
-		}
-		input.CandidateProfile = strings.TrimSpace(input.CandidateProfile)
-		input.VacancyText = strings.TrimSpace(input.VacancyText)
-		if input.CandidateProfile == "" || input.VacancyText == "" {
-			writeError(w, http.StatusBadRequest, "заполните профиль кандидата и текст вакансии")
-			return
-		}
-
-		letter, err := generateLetter(r.Context(), client, cfg, input)
-		if err != nil {
-			log.Printf("generate letter: %v", err)
-			writeError(w, http.StatusBadGateway, "не удалось сгенерировать письмо: "+err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, letterResponse{Letter: letter, Model: cfg.Model})
+func handleLetter(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "используйте POST")
+		return
+	}
+	var input letterRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "неверный JSON: "+err.Error())
+		return
+	}
+	input.CandidateProfile = strings.TrimSpace(input.CandidateProfile)
+	input.VacancyText = strings.TrimSpace(input.VacancyText)
+	input.VacancyTitle = strings.TrimSpace(input.VacancyTitle)
+	if input.CandidateProfile == "" {
+		writeError(w, http.StatusBadRequest, "добавьте краткую информацию о себе")
+		return
+	}
+	if input.VacancyText == "" && input.VacancyTitle == "" {
+		writeError(w, http.StatusBadRequest, "добавьте ссылку, название или текст вакансии")
+		return
+	}
+	writeJSON(w, http.StatusOK, letterResponse{Letter: buildTemplateLetter(input), Source: "local_template"})
 }
-
-func generateLetter(ctx context.Context, client *http.Client, cfg config, input letterRequest) (string, error) {
-	prompt := fmt.Sprintf("ПРОФИЛЬ КАНДИДАТА:\n%s\n\nВАКАНСИЯ:\n%s", input.CandidateProfile, input.VacancyText)
-	body, err := json.Marshal(openAIRequest{
-		Model: cfg.Model, Instructions: letterInstructions, Input: prompt,
-		Store: false, Temperature: 0.35, MaxOutputTokens: 450,
-	})
-	if err != nil {
-		return "", err
+func buildTemplateLetter(input letterRequest) string {
+	title := strings.TrimSpace(input.VacancyTitle)
+	if title == "" {
+		title = firstLine(input.VacancyText, 120)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/responses", bytes.NewReader(body))
-	if err != nil {
-		return "", err
+	if title == "" || title == "Вакансия на hh.ru" {
+		title = "вакансия в вашей команде"
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
+	summary := firstSentences(input.CandidateProfile, 2, 520)
+	return "Здравствуйте!\n\nЗаинтересовала вакансия «" + title + "».\n\nКоротко о релевантном опыте: " + summary + "\n\nБуду рад подробнее обсудить, как смогу быть полезен команде. Спасибо за рассмотрение!"
+}
+func firstLine(text string, limit int) string {
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "Вакансия:"))
+		if line != "" {
+			return truncateText(line, limit)
+		}
 	}
-	defer resp.Body.Close()
-	result, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("OpenAI вернул %s: %s", resp.Status, compactError(result))
-	}
-
-	var parsed openAIResponse
-	if err := json.Unmarshal(result, &parsed); err != nil {
-		return "", errors.New("не удалось прочитать ответ OpenAI")
-	}
-	letter := strings.TrimSpace(parsed.OutputText)
-	if letter == "" {
-		for _, item := range parsed.Output {
-			for _, content := range item.Content {
-				if content.Type == "output_text" {
-					letter += content.Text
-				}
+	return ""
+}
+func firstSentences(text string, amount, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	end, found := 0, 0
+	for index, char := range text {
+		if char == '.' || char == '!' || char == '?' {
+			end, found = index+len(string(char)), found+1
+			if found == amount {
+				break
 			}
 		}
-		letter = strings.TrimSpace(letter)
 	}
-	if letter == "" {
-		return "", errors.New("OpenAI не вернул текст письма")
+	if end > 0 {
+		text = text[:end]
 	}
-	return letter, nil
+	return truncateText(text, limit)
+}
+func truncateText(text string, limit int) string {
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
 }
 
-func compactError(raw []byte) string {
-	var payload struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+// loadDotEnv lets a local .env work without requiring the user to export it manually.
+func loadDotEnv(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
 	}
-	if json.Unmarshal(raw, &payload) == nil && payload.Error.Message != "" {
-		return payload.Error.Message
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, strings.Trim(strings.TrimSpace(value), "\"'"))
 	}
-	return strings.TrimSpace(string(raw))
 }
-
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -202,34 +152,40 @@ func securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
 func setCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 }
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
-
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
 var pageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cover Letter Studio</title><style>
-:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#e8edf8;background:#0d1220}body{margin:0}.wrap{max-width:1100px;margin:auto;padding:40px 20px 64px}h1{margin:0;font-size:clamp(30px,5vw,48px)}.lead{color:#afbdd7;max-width:780px;line-height:1.55}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:28px}.card{background:#151d30;border:1px solid #293550;border-radius:16px;padding:20px}label{display:block;font-weight:650;margin-bottom:8px}textarea,input,select{width:100%;box-sizing:border-box;border-radius:10px;border:1px solid #3a4967;padding:13px;background:#0d1423;color:#e8edf8;font:14px/1.5 inherit}textarea{height:350px;resize:vertical}button{margin-top:20px;border:0;border-radius:10px;padding:13px 18px;background:#7c5cff;color:#fff;font:600 15px inherit;cursor:pointer}button.secondary{background:#273552;margin-left:8px}button:disabled{opacity:.6;cursor:wait}.note{color:#aab8d1;font-size:13px;line-height:1.5}.result{white-space:pre-wrap;min-height:185px;line-height:1.6}.error{color:#ffb4b4}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.automation{margin-top:24px;display:flex;align-items:center;justify-content:space-between;gap:16px}.badge{display:inline-block;color:#d8e2ff;background:#202d4a;border:1px solid #3a4c73;border-radius:99px;padding:5px 10px;font-size:13px}.modal{position:fixed;inset:0;background:#060a13cc;display:flex;align-items:center;justify-content:center;padding:20px;z-index:2}.modal[hidden]{display:none}.dialog{width:min(680px,100%);max-height:calc(100vh - 40px);overflow:auto;background:#151d30;border:1px solid #3a4967;border-radius:18px;padding:24px}.choices{display:grid;gap:10px;margin:16px 0}.choice{display:block;border:1px solid #3a4967;border-radius:12px;padding:14px;cursor:pointer}.choice:has(input:checked){border-color:#8d78ff;background:#1e1b42}.choice input{width:auto;margin-right:8px}.rules{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}.rules .wide{grid-column:1/-1}.privacy{border-left:3px solid #7c5cff;padding-left:12px}.hidden{display:none}@media(max-width:760px){.grid,.rules{grid-template-columns:1fr}.rules .wide{grid-column:auto}textarea{height:260px}.top,.automation{display:block}button.secondary{margin-left:0}.automation button{margin-top:12px}}
-</style></head><body><main class="wrap"><div class="top"><div><h1>Cover Letter Studio</h1><p class="lead">Персональные письма и аккуратная очередь откликов на вакансии. Бот не отправляет ничего без выбранного вами режима и заданных ограничений.</p></div><span id="modeBadge" class="badge">Настройка не завершена</span></div><section class="card automation"><div><strong>Ассистент откликов</strong><p id="automationSummary" class="note">Укажите способ работы и фильтры, чтобы начать.</p></div><button id="openSetup">Включить и настроить</button></section><div class="grid"><section class="card"><label for="profile">Профиль кандидата</label><textarea id="profile" placeholder="Вставьте проверенные факты: опыт, проекты, стек, образование, язык, результаты. Не добавляйте навыки, которыми не владеете."></textarea><p class="note">Совет: сохраните здесь актуальную версию резюме или краткую выжимку из неё.</p></section><section class="card"><label for="vacancy">Текст вакансии</label><textarea id="vacancy" placeholder="Вставьте описание вакансии целиком: задачи, требования и информацию о компании."></textarea><button id="generate">Сгенерировать письмо</button><button id="copyLetter" class="secondary" type="button">Копировать</button><p class="note">Используется OpenAI API. Ключ хранится только в переменной окружения сервера.</p></section></div><section class="card" style="margin-top:20px"><label>Готовое сопроводительное письмо</label><div id="result" class="result note">Здесь появится результат.</div></section></main><div class="modal" id="setupModal" hidden><form class="dialog" id="setupForm"><h2>Как будет работать ассистент?</h2><p class="note">Рекомендую начать с очереди на подтверждение: вы видите вакансию, письмо и кнопку отправки до каждого отклика.</p><div class="choices"><label class="choice"><input type="radio" name="mode" value="drafts"> <strong>Только черновики</strong><br><span class="note">Генерирует письмо, отклик вы отправляете сами.</span></label><label class="choice"><input type="radio" name="mode" value="review" checked> <strong>Очередь на подтверждение — рекомендовано</strong><br><span class="note">Подбирает вакансии и готовит письма, но каждый отклик подтверждаете вы.</span></label><label class="choice"><input type="radio" name="mode" value="automatic"> <strong>Автоподача по строгим правилам</strong><br><span class="note">Допускается только после подключения официального канала hh.ru; применяются все фильтры и дневной лимит.</span></label></div><div class="rules"><label class="wide">Ищу позиции<input id="queries" required placeholder="Например: Go developer, automation engineer"></label><label>Города / формат<input id="locations" placeholder="Минск, удалённо"></label><label>Минимальная зарплата<input id="salary" inputmode="numeric" placeholder="Например: 2500"></label><label>Макс. откликов в день<input id="dailyLimit" type="number" min="1" max="30" value="8" required></label><label class="wide">Обязательные навыки<input id="includeKeywords" placeholder="Go, PostgreSQL, n8n"></label><label class="wide">Исключить вакансии<input id="excludeKeywords" placeholder="стажировка, холодные продажи"></label></div><p class="note privacy">Настройки сохраняются только в браузере этого устройства. Подключение к hh.ru и отправка откликов пока не настроены — бот не сможет отправить заявку сам.</p><button type="submit">Сохранить режим</button><button type="button" class="secondary" id="closeSetup">Отмена</button></form></div><script>
-const button=document.querySelector('#generate'),result=document.querySelector('#result'),modal=document.querySelector('#setupModal'),setupForm=document.querySelector('#setupForm'),modeBadge=document.querySelector('#modeBadge'),automationSummary=document.querySelector('#automationSummary');
-const modes={drafts:'Только черновики',review:'Очередь на подтверждение',automatic:'Автоподача: ждёт подключения hh.ru'};
-function renderSettings(){const raw=localStorage.getItem('autoApplySettings');if(!raw)return;const s=JSON.parse(raw);modeBadge.textContent=modes[s.mode];automationSummary.textContent=s.queries+' · до '+s.dailyLimit+' откликов в день'+(s.locations?' · '+s.locations:'');document.querySelector('#openSetup').textContent='Изменить настройки'}
-function openSetup(){const raw=localStorage.getItem('autoApplySettings');if(raw){const s=JSON.parse(raw);setupForm.mode.value=s.mode;['queries','locations','salary','dailyLimit','includeKeywords','excludeKeywords'].forEach(id=>document.querySelector('#'+id).value=s[id]||'')}modal.hidden=false}
-document.querySelector('#openSetup').addEventListener('click',openSetup);document.querySelector('#closeSetup').addEventListener('click',()=>modal.hidden=true);modal.addEventListener('click',e=>{if(e.target===modal)modal.hidden=true});
-setupForm.addEventListener('submit',e=>{e.preventDefault();const settings={mode:setupForm.mode.value};['queries','locations','salary','dailyLimit','includeKeywords','excludeKeywords'].forEach(id=>settings[id]=document.querySelector('#'+id).value.trim());localStorage.setItem('autoApplySettings',JSON.stringify(settings));modal.hidden=true;renderSettings()});renderSettings();
-button.addEventListener('click',async()=>{const candidate_profile=document.querySelector('#profile').value,vacancy_text=document.querySelector('#vacancy').value;if(!candidate_profile.trim()||!vacancy_text.trim()){result.textContent='Заполните профиль и вакансию.';result.className='result error';return}button.disabled=true;button.textContent='Генерирую…';result.textContent='';result.className='result note';try{const r=await fetch('/api/letter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_profile,vacancy_text})});const data=await r.json();if(!r.ok)throw new Error(data.error||'Ошибка запроса');result.textContent=data.letter;result.className='result'}catch(e){result.textContent=e.message;result.className='result error'}finally{button.disabled=false;button.textContent='Сгенерировать письмо'}});
-document.querySelector('#copyLetter').addEventListener('click',async()=>{if(!result.textContent||result.classList.contains('error'))return;try{await navigator.clipboard.writeText(result.textContent);document.querySelector('#copyLetter').textContent='Скопировано';setTimeout(()=>document.querySelector('#copyLetter').textContent='Копировать',1500)}catch{result.textContent='Не удалось скопировать текст. Выделите его вручную.';result.className='result error'}});
+<title>Reply Studio — сопроводительные письма</title><style>
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#f7f8ff;background:#0a0d1a}*{box-sizing:border-box}body{margin:0;min-width:320px;background:radial-gradient(circle at 18% -10%,#30408f 0,transparent 32rem),radial-gradient(circle at 100% 18%,#562d77 0,transparent 30rem),#0a0d1a}.shell{width:min(1180px,100%);margin:auto;padding:26px 22px 68px}.nav{display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:10px;font-weight:750;letter-spacing:-.035em}.mark{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,#9b87ff,#4de2cb);color:#101327;font-size:18px}.state{border:1px solid #455178;border-radius:999px;padding:7px 11px;color:#bdc9e9;font-size:12px}.hero{padding:72px 0 34px;max-width:810px}.eyebrow{margin:0 0 12px;color:#9af2e5;font-size:12px;font-weight:760;letter-spacing:.14em;text-transform:uppercase}.hero h1{max-width:760px;margin:0;font-size:clamp(39px,7vw,74px);line-height:.98;letter-spacing:-.065em}.hero h1 span{color:#9e8bff}.lead{margin:23px 0 0;max-width:680px;color:#b7c1dc;font-size:17px;line-height:1.65}.steps{display:flex;flex-wrap:wrap;gap:9px;margin-top:28px}.step{border:1px solid #313b5d;border-radius:999px;padding:8px 12px;color:#c6cfea;font-size:13px}.step b{margin-right:5px;color:#8ef2df}.workbench{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(330px,.95fr);gap:16px;align-items:start}.card{position:relative;overflow:hidden;border:1px solid #2d3758;border-radius:22px;background:linear-gradient(145deg,#171c31e8,#0e1222ed);box-shadow:0 24px 70px #0000002e;padding:22px}.card:before{position:absolute;inset:0;pointer-events:none;content:"";background:linear-gradient(120deg,#fff1 0,transparent 24%)}.card>*{position:relative}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}.index{color:#9e8bff;font-size:12px;font-weight:800;letter-spacing:.12em}.card h2{margin:5px 0 0;font-size:22px;letter-spacing:-.035em}.subtle{margin:7px 0 0;color:#aab4d0;font-size:13px;line-height:1.55}.field{display:block;margin-top:17px;color:#e9edfa;font-size:13px;font-weight:680}.field span{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}.field small{color:#95a1bf;font-weight:500}textarea,input{width:100%;border:1px solid #3a466b;border-radius:13px;background:#0a0e1d;color:#f5f7ff;font:inherit;outline:0;transition:border .18s,box-shadow .18s,background .18s}textarea{min-height:205px;padding:14px;resize:vertical;line-height:1.55}input{padding:13px}textarea:focus,input:focus{border-color:#9b87ff;background:#0d1224;box-shadow:0 0 0 4px #9b87ff24}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:16px}button,.button-link{appearance:none;border:0;border-radius:12px;padding:12px 15px;background:linear-gradient(135deg,#9c88ff,#755cff);color:white;font:700 14px inherit;cursor:pointer;text-decoration:none;transition:transform .18s,filter .18s,opacity .18s}button:hover,.button-link:hover{transform:translateY(-1px);filter:brightness(1.08)}button:disabled{cursor:wait;opacity:.58;transform:none}.quiet{border:1px solid #3a466b;background:#202842;color:#d9e1fa}.tiny{margin:14px 0 0;color:#95a1bf;font-size:12px;line-height:1.55}.save-note{color:#85e8d5}.result-card{min-height:540px;display:flex;flex-direction:column}.letter{flex:1;min-height:300px;white-space:pre-wrap;border:1px solid #303b5f;border-radius:16px;background:#090d1b9c;padding:18px;color:#ecf0fc;font-size:15px;line-height:1.72}.letter.empty{display:flex;align-items:center;color:#94a0bf}.letter.error{color:#ffb1b7;border-color:#773b53}.letter.loading{color:#c5baff}.result-actions{margin-top:auto}.queue-card{margin-top:16px}.queue{display:grid;gap:10px}.queue-empty{padding:18px;border:1px dashed #3c476b;border-radius:14px;color:#96a1bf;font-size:14px}.queue-item{border:1px solid #344062;border-radius:15px;padding:14px;background:#0a0e1aa6}.queue-item strong{font-size:14px}.queue-item p{margin:7px 0 0;color:#aab4d0;font-size:13px}.queue-item .actions{margin-top:10px}.queue-item button{padding:9px 11px;font-size:12px}.notice{margin-top:16px;border-left:2px solid #56e5cf;padding:10px 12px;color:#abb6d2;background:#0d213026;border-radius:0 10px 10px 0;font-size:12px;line-height:1.55}.footer{margin-top:22px;color:#7e89a6;font-size:12px;line-height:1.55}.footer a{color:#a99bff}.hidden{display:none}@media(max-width:800px){.shell{padding:20px 15px 46px}.hero{padding:47px 0 27px}.workbench{grid-template-columns:1fr}.result-card{min-height:410px}.hero h1{font-size:45px}.nav .state{display:none}}@media(max-width:420px){.card{padding:18px}.actions{display:grid}.actions>*{width:100%}.hero h1{font-size:38px}}
+</style></head><body><main class="shell"><nav class="nav"><div class="brand"><span class="mark">↗</span>Reply Studio</div><span class="state" id="profileState">профиль не сохранён</span></nav><header class="hero"><p class="eyebrow">Сопроводительные письма без AI-лимитов</p><h1>Хороший отклик.<br><span>Без лишних шагов.</span></h1><p class="lead">Вставьте краткое «о себе» и ссылку на вакансию. Письмо появится автоматически, останется у вас на проверку и будет готово к отправке в hh.ru.</p><div class="steps"><span class="step"><b>01</b> О себе</span><span class="step"><b>02</b> Ссылка hh.ru</span><span class="step"><b>03</b> Копировать и откликнуться</span></div></header><section class="workbench"><article class="card"><div class="section-head"><div><span class="index">01 · ВАШ КОНТЕКСТ</span><h2>Расскажите о себе</h2><p class="subtle">Достаточно 3–6 предложений: роль, стек, проект и сильный результат.</p></div></div><label class="field" for="profile"><span>Профиль <small>сохраняется только в этом браузере</small></span><textarea id="profile" placeholder="Например: AI Automation Engineer с опытом Go-разработки. Создаю REST API, интеграции и интерфейсы на React/TypeScript…"></textarea></label><div class="actions"><button id="saveProfile" type="button">Сохранить профиль</button></div><p id="saveNote" class="tiny">После сохранения его не нужно вставлять повторно.</p><div class="notice">Письмо строится локально по вашему тексту. Сервис не придумывает опыт и не получает доступ к аккаунту hh.ru.</div><div class="section-head" style="margin-top:28px;margin-bottom:0"><div><span class="index">02 · ВАКАНСИЯ</span><h2>Вставьте ссылку</h2><p class="subtle">После вставки корректной ссылки письмо формируется само.</p></div></div><label class="field" for="vacancyUrl"><span>Ссылка на вакансию hh.ru</span><input id="vacancyUrl" type="url" inputmode="url" placeholder="https://hh.ru/vacancy/…" autocomplete="url"></label><label class="field" for="vacancyTitle"><span>Название вакансии <small>необязательно, улучшает точность</small></span><input id="vacancyTitle" type="text" placeholder="Например: AI Automation Engineer"></label><label class="field" for="vacancyText"><span>Детали вакансии <small>необязательно</small></span><textarea id="vacancyText" style="min-height:110px" placeholder="Вставьте требования, если хотите учесть их в письме."></textarea></label><div class="actions"><button id="generate" type="button">Собрать письмо</button><a id="openVacancy" class="button-link quiet hidden" target="_blank" rel="noreferrer">Открыть вакансию</a></div></article><article class="card result-card"><div class="section-head"><div><span class="index">03 · ПРЕДПРОСМОТР</span><h2>Ваше письмо</h2><p class="subtle">Проверьте формулировки перед отправкой.</p></div></div><div id="result" class="letter empty">Здесь появится готовое письмо.</div><div class="actions result-actions"><button id="copyLetter" class="quiet" type="button">Копировать</button><button id="queueLetter" type="button">В очередь</button></div><p class="tiny">«В очередь» сохранит черновик и откроет вакансию только после вашего подтверждения.</p></article></section><section class="card queue-card"><div class="section-head"><div><span class="index">ЧЕРНОВИКИ</span><h2>Очередь на подтверждение</h2><p class="subtle">Никакой автоподачи: вы открываете вакансию и отправляете отклик сами.</p></div></div><div id="queue" class="queue"></div></section><p class="footer">Поиск вакансий внутри приложения отключён: официальный API hh.ru на этой сети возвращает защитную блокировку. Это нельзя и не нужно обходить. Ищите вакансии в <a href="https://hh.ru/search/vacancy" target="_blank" rel="noreferrer">hh.ru</a>, а сюда вставляйте ссылку на подходящую вакансию.</p></main><script>
+const profile=document.querySelector('#profile'),vacancyUrl=document.querySelector('#vacancyUrl'),vacancyTitle=document.querySelector('#vacancyTitle'),vacancyText=document.querySelector('#vacancyText'),result=document.querySelector('#result'),generate=document.querySelector('#generate'),copyLetter=document.querySelector('#copyLetter'),queue=document.querySelector('#queue'),profileState=document.querySelector('#profileState'),saveNote=document.querySelector('#saveNote'),openVacancy=document.querySelector('#openVacancy');let profileTimer,linkTimer;
+function safeJSON(key,fallback){try{return JSON.parse(localStorage.getItem(key)||'')}catch{return fallback}}
+function savedProfile(){return localStorage.getItem('candidateProfile')||''}
+function validHHURL(value){try{const url=new URL(value);return(url.protocol==='https:'||url.protocol==='http:')&&(url.hostname==='hh.ru'||url.hostname.endsWith('.hh.ru'))&&url.pathname.includes('/vacancy/')?url.href:''}catch{return ''}}
+function setResult(text,kind=''){result.textContent=text;result.className='letter '+kind;result.dataset.letter=kind?'':text}
+function saveProfile(silent=false){const value=profile.value.trim();if(!value){if(!silent){setResult('Добавьте несколько предложений о себе — это основа письма.','error')}return false}localStorage.setItem('candidateProfile',value);profileState.textContent='профиль сохранён локально';saveNote.textContent='Готово. Профиль останется на этом устройстве.';saveNote.className='tiny save-note';return true}
+function updateVacancyLink(){const url=validHHURL(vacancyUrl.value.trim());openVacancy.classList.toggle('hidden',!url);if(url)openVacancy.href=url;return url}
+async function createLetter(auto=false){const candidate=profile.value.trim(),url=updateVacancyLink(),title=vacancyTitle.value.trim(),details=vacancyText.value.trim();if(!candidate){setResult('Сначала добавьте краткое «о себе». Профиль сохранится автоматически.','error');return}if(vacancyUrl.value.trim()&&!url){setResult('Нужна полная ссылка вида https://hh.ru/vacancy/…','error');return}if(!url&&!title&&!details){setResult('Вставьте ссылку на hh.ru, название или текст вакансии.','error');return}saveProfile(true);generate.disabled=true;generate.textContent=auto?'Готовлю…':'Собираю…';setResult('Собираю письмо из ваших данных…','loading');try{const r=await fetch('/api/letter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_profile:candidate,vacancy_title:title,vacancy_text:details||'Вакансия на hh.ru'})});const data=await r.json();if(!r.ok)throw new Error(data.error||'Не удалось собрать письмо');setResult(data.letter)}catch(error){setResult(error.message||'Не удалось соединиться с приложением.','error')}finally{generate.disabled=false;generate.textContent='Собрать письмо'}}
+function items(){return safeJSON('autoApplyQueue',[])}
+function renderQueue(){const list=items();queue.replaceChildren();if(!list.length){const empty=document.createElement('div');empty.className='queue-empty';empty.textContent='Пока пусто. Добавьте подготовленное письмо в очередь.';queue.append(empty);return}list.forEach((item,index)=>{const card=document.createElement('article');card.className='queue-item';const name=document.createElement('strong');name.textContent=item.title||'Вакансия на hh.ru';const caption=document.createElement('p');caption.textContent='Письмо готово и ждёт вашего подтверждения.';const actions=document.createElement('div');actions.className='actions';const approve=document.createElement('button');approve.type='button';approve.textContent='Открыть и скопировать';approve.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(item.letter)}catch{}window.open(item.url,'_blank','noopener');approve.textContent='Открыто'});const remove=document.createElement('button');remove.type='button';remove.className='quiet';remove.textContent='Убрать';remove.addEventListener('click',()=>{const next=items();next.splice(index,1);localStorage.setItem('autoApplyQueue',JSON.stringify(next));renderQueue()});actions.append(approve,remove);card.append(name,caption,actions);queue.append(card)})}
+profile.value=savedProfile();if(profile.value){profileState.textContent='профиль сохранён локально';saveNote.textContent='Профиль восстановлен с этого устройства.';saveNote.className='tiny save-note'}renderQueue();
+document.querySelector('#saveProfile').addEventListener('click',()=>{if(saveProfile()){setResult('Профиль сохранён. Теперь вставьте ссылку на вакансию.','empty')}});
+profile.addEventListener('input',()=>{clearTimeout(profileTimer);profileTimer=setTimeout(()=>{if(profile.value.trim())saveProfile(true)},450)});
+vacancyUrl.addEventListener('input',()=>{clearTimeout(linkTimer);const url=updateVacancyLink();if(!vacancyUrl.value.trim())return;if(!url){setResult('Проверьте ссылку: она должна вести на страницу вакансии hh.ru.','error');return}setResult('Ссылка принята. Готовлю письмо…','loading');linkTimer=setTimeout(()=>createLetter(true),350)});
+generate.addEventListener('click',()=>createLetter());
+copyLetter.addEventListener('click',async()=>{const letter=result.dataset.letter||'';if(!letter){setResult('Сначала соберите письмо.','error');return}try{await navigator.clipboard.writeText(letter);copyLetter.textContent='Скопировано';setTimeout(()=>copyLetter.textContent='Копировать',1600)}catch{setResult('Не удалось скопировать автоматически. Выделите текст вручную.','error')}});
+document.querySelector('#queueLetter').addEventListener('click',()=>{const letter=result.dataset.letter||'',url=validHHURL(vacancyUrl.value.trim());if(!letter){setResult('Сначала соберите письмо.','error');return}if(!url){setResult('Для очереди добавьте корректную ссылку на hh.ru.','error');return}const list=items();if(list.some(item=>item.url===url)){setResult('Эта вакансия уже в очереди.','notice');return}list.push({url,title:vacancyTitle.value.trim(),letter});localStorage.setItem('autoApplyQueue',JSON.stringify(list));renderQueue();setResult('Черновик добавлен в очередь. Откройте вакансию, когда будете готовы.','notice');});
 </script></body></html>`))

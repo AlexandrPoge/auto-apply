@@ -22,9 +22,6 @@ coverage.out
 # Air
 tmp/
 
-# Empty nested Git checkout accidentally created beside the application.
-/auto-apply/
-
 # Executables
 *.exe
 *.exe~
